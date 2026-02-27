@@ -6,6 +6,11 @@
 > - 原始碼（可自己改）
 > - Release 的 Windows `.exe`（可直接跑）
 
+## 下載與版本
+
+- **穩定版**：`main` 分支 + GitHub Releases（Windows 可執行檔）
+- **v2 開發中（WIP）**：`v2` 分支（請先讀 `v2/README.md`）
+
 ---
 
 ## 主要功能
