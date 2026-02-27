@@ -2,7 +2,7 @@
 """
 AI 協作流程控制器
 - 三窗口工作流程（架構師 A / 審查員 B / 執行者 C）
-- 一鍵產生 CLI 指令 → 複製到剪貼簿 → 貼到 Copilot CLI
+- 一鍵產生 CLI 指令 → 複製到剪貼簿 → 貼到 Copilot CLI / Claude CLI / Codex CLI / 其他AI
 - 多專案管理
 - ttkbootstrap 主題美化
 """
