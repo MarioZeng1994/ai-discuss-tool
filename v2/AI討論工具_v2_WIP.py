@@ -38,6 +38,69 @@ CONFIG_FILE = os.path.join(DESKTOP, "AI流程控制器_config.json")
 ICON_NAME_ICO = "玻璃球.ico"
 ICON_NAME_ICNS = "玻璃球.icns"
 
+# CLI 指令清單：每個工具的所有常用指令 (指令, 說明)
+CLI_COMMANDS = {
+    "Copilot": [
+        ("copilot", "啟動互動模式"),
+        ("copilot -p \"prompt\"", "非互動模式，執行完直接結束"),
+        ("copilot --allow-all", "全自動，跳過所有工具確認"),
+        ("copilot --yolo", "同上，--allow-all 的別名"),
+        ("copilot --allow-all-tools", "允許所有工具（腳本/CI 用途）"),
+        ("copilot --allow-tool \"shell(npm run *)\"", "只允許特定 pattern 的工具"),
+        ("copilot --deny-tool \"shell(rm *)\"", "封鎖特定工具（優先於 allow）"),
+        ("copilot --allow-all-paths", "允許存取所有路徑（非互動模式必要）"),
+        ("copilot --model claude-opus-4-6", "指定模型"),
+        ("copilot --resume", "恢復上次 session"),
+        ("copilot --continue", "直接繼續最近一次 session"),
+        ("copilot --stream off", "關閉串流，完成後一次輸出"),
+        ("copilot --disable-parallel-tools-execution", "強制工具依序執行（預設是並行）"),
+        ("copilot --experimental", "開啟實驗性功能"),
+        ("copilot --banner", "顯示啟動動畫 banner"),
+    ],
+    "Claude": [
+        ("claude", "啟動互動模式"),
+        ("claude \"prompt\"", "帶初始 prompt 啟動"),
+        ("claude -p \"prompt\"", "非互動模式，執行完直接結束"),
+        ("claude -c", "繼續最近一次對話"),
+        ("claude -r \"session-id\"", "指定 session ID 恢復"),
+        ("claude --dangerously-skip-permissions", "全自動，跳過所有權限提示（YOLO mode）"),
+        ("claude --permission-mode bypassPermissions", "同上，另一種寫法"),
+        ("claude --permission-mode plan", "只規劃不執行，最安全"),
+        ("claude --allowedTools \"Bash,Read,Edit\"", "指定允許的工具清單"),
+        ("claude --disallowedTools \"Bash\"", "封鎖特定工具"),
+        ("claude --model opus", "指定模型（opus/sonnet/haiku 或完整名稱）"),
+        ("claude --max-turns 3", "限制最多幾輪（非互動模式用）"),
+        ("claude --add-dir ../lib", "加入額外可存取目錄"),
+        ("claude --append-system-prompt \"用繁體中文\"", "追加 system prompt（保留預設）"),
+        ("claude --system-prompt \"你是 Python 專家\"", "完全取代 system prompt"),
+        ("claude --output-format json", "輸出為 JSON（腳本/CI 用）"),
+        ("claude --verbose", "顯示詳細 debug log"),
+        ("claude --mcp-config ./mcp.json", "載入 MCP 設定"),
+        ("claude --debug \"api,mcp\"", "Debug 模式，可過濾類別"),
+    ],
+    "Codex": [
+        ("codex", "啟動互動模式"),
+        ("codex exec \"prompt\"", "非互動模式，自動執行到結束"),
+        ("codex --full-auto", "全自動低摩擦模式（workspace-write sandbox + on-request 審批）"),
+        ("codex --dangerously-bypass-approvals-and-sandbox", "完全繞過審批與沙箱（只在隔離環境用）"),
+        ("codex --yolo", "同上，別名"),
+        ("codex -a never", "審批模式：從不詢問"),
+        ("codex -a on-request", "審批模式：只在必要時問（預設）"),
+        ("codex -a untrusted", "審批模式：每個動作都問"),
+        ("codex --sandbox workspace-write", "沙箱模式：允許寫入 workspace"),
+        ("codex --sandbox read-only", "沙箱模式：唯讀"),
+        ("codex --sandbox danger-full-access", "沙箱模式：完全存取（搭配容器使用）"),
+        ("codex --model gpt-5-codex", "指定模型"),
+        ("codex --profile full_auto", "套用 config.toml 裡的 profile"),
+        ("codex --resume", "恢復上次 session"),
+        ("codex --cd /path/to/project", "指定工作目錄"),
+        ("codex --add-dir ../lib", "加入額外目錄"),
+        ("codex --json", "輸出 JSON 格式（腳本用）"),
+        ("codex --oss", "使用本地 OSS provider（需 Ollama）"),
+        ("codex --enable feature_name", "開啟 feature flag"),
+    ],
+}
+
 
 def resource_path(relative_path: str) -> str:
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -62,8 +125,8 @@ def save_config(cfg):
 # ──────────────────────────────────────
 # 鐵律（自動帶入所有開場指令）
 # ──────────────────────────────────────
-IRON_RULES = """重點鐵規則「你每次回覆結尾都用 ask_user」!!!
-在每輪對話中必須遵守的行為規則：每次回覆的最後一個工具呼叫一定是 ask_user。
+IRON_RULES = """重點鐵規則「每次回覆結尾都要確認下一步」!!!
+在每輪對話中必須遵守的行為規則：每次回覆的最後一段一定要問我「接下來要做什麼」或「這樣可以嗎」，不准自己做完就不說話。
 我不會代碼，你跟我溝通使用自然語言（中文白話）。
 
 品質要求（每次回覆都遵守）：
@@ -233,7 +296,7 @@ CLAUDE_MD_TEMPLATE = """# CLAUDE.md — AI 永久記憶（{project_name}）
 - 建立日期：{date}
 
 ## 鐵規則（Iron Rules）
-1. 每次回覆結尾用 ask_user
+1. 每次回覆結尾都要確認下一步（問我「接下來要做什麼」或「這樣可以嗎」）
 2. 用中文白話溝通，不用技術術語
 3. 改代碼前先回報理解，等業主確認
 4. 不做規格書外的修改
@@ -467,7 +530,7 @@ class App:
         row3 = ttkb.Frame(frm)
         row3.pack(fill=X, pady=4)
         ttkb.Label(row3, text="代碼資料夾：", width=12).pack(side=LEFT)
-        self.setup_code_var = tk.StringVar(value="report_tool")
+        self.setup_code_var = tk.StringVar(value="my_project")
         ttkb.Entry(row3, textvariable=self.setup_code_var, width=30).pack(side=LEFT, fill=X, expand=True)
         ttkb.Label(row3, text="（已有的程式碼放在這裡）", bootstyle="secondary").pack(side=LEFT, padx=4)
 
@@ -483,7 +546,7 @@ class App:
         row5 = ttkb.Frame(frm)
         row5.pack(fill=X, pady=4)
         ttkb.Label(row5, text="C 額外讀檔：", width=12).pack(side=LEFT)
-        self.setup_extra_c_var = tk.StringVar(value="adapters/html_dashboard_adapter.py")
+        self.setup_extra_c_var = tk.StringVar(value="src/main.py")
         ttkb.Entry(row5, textvariable=self.setup_extra_c_var, width=60).pack(side=LEFT, fill=X, expand=True)
 
         # 說明
@@ -516,6 +579,17 @@ class App:
         # CLI 啟動指令
         cli_frame = ttkb.LabelFrame(frm, text="Step 1：啟動 CLI（複製後貼到終端機）")
         cli_frame.pack(fill=X, pady=(0, 12), padx=4, ipady=4, ipadx=4)
+
+        # CLI 預設選擇按鈕（點進去選該工具的所有指令）
+        preset_frame = ttkb.Frame(cli_frame)
+        preset_frame.pack(fill=X, pady=(4, 4))
+        for cli_name, style in [("Copilot", "info"), ("Claude", "warning"), ("Codex", "success")]:
+            ttkb.Button(preset_frame, text=cli_name, bootstyle=style, width=10,
+                        command=lambda n=cli_name: self._open_cli_picker(n)
+                        ).pack(side=LEFT, padx=3)
+        ttkb.Button(preset_frame, text="✏️ 自訂指令", bootstyle="secondary", width=10,
+                    command=self._enable_custom_cli
+                    ).pack(side=LEFT, padx=3)
 
         self.cli_cmd_text = tk.Text(cli_frame, height=3, wrap=tk.WORD,
                                     font=("Consolas" if IS_WIN else "Menlo", 11))
@@ -853,11 +927,90 @@ class App:
         code = proj.get("code_folder", "")
         code_path = os.path.join(folder, code) if code else folder
 
-        cmd = f"cd \"{code_path}\"\ncopilot --allow-all"
+        cli_cmd = proj.get("cli_preset_cmd", "copilot --allow-all")
+        cli_desc = proj.get("cli_preset_desc", "全自動，跳過所有工具確認")
+
+        cmd = f"cd \"{code_path}\"\n{cli_cmd}  # {cli_desc}"
         self.cli_cmd_text.config(state=tk.NORMAL)
         self.cli_cmd_text.delete("1.0", tk.END)
         self.cli_cmd_text.insert("1.0", cmd)
         self.cli_cmd_text.config(state=tk.DISABLED)
+
+    def _open_cli_picker(self, cli_name):
+        """點了 Copilot/Claude/Codex 按鈕，跳出該工具的所有指令讓使用者選"""
+        proj = self._get_project()
+        if not proj:
+            messagebox.showwarning("提示", "請先選擇專案")
+            return
+
+        commands = CLI_COMMANDS.get(cli_name, [])
+        if not commands:
+            return
+
+        picker = tk.Toplevel(self.root)
+        picker.withdraw()
+        picker.title(f"選擇 {cli_name} 指令")
+        picker.resizable(True, True)
+        picker.transient(self.root)
+        picker.grab_set()
+        picker.bind("<Escape>", lambda e: picker.destroy())
+
+        ttkb.Label(picker, text=f"{cli_name} — 點選要使用的指令",
+                   font=("", 12, "bold")).pack(anchor=W, padx=12, pady=(12, 8))
+
+        list_frame = ttkb.Frame(picker)
+        list_frame.pack(fill=BOTH, expand=True, padx=12, pady=(0, 12))
+
+        scrollbar = ttkb.Scrollbar(list_frame)
+        scrollbar.pack(side=RIGHT, fill=Y)
+
+        listbox = tk.Listbox(list_frame, font=("Consolas" if IS_WIN else "Menlo", 10),
+                             yscrollcommand=scrollbar.set, activestyle="dotbox",
+                             selectmode=tk.SINGLE)
+        listbox.pack(fill=BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        for cmd, desc in commands:
+            listbox.insert(tk.END, f"{cmd}  # {desc}")
+
+        def on_select(event=None):
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            chosen_cmd, chosen_desc = commands[idx]
+            proj["cli_preset_cmd"] = chosen_cmd
+            proj["cli_preset_desc"] = chosen_desc
+            save_config(self.cfg)
+            self._update_cli_command()
+            self.status_var.set(f"已選擇：{chosen_cmd}")
+            picker.destroy()
+
+        listbox.bind("<Double-Button-1>", on_select)
+        ttkb.Button(picker, text="確認選擇", bootstyle="success",
+                    command=on_select).pack(pady=(0, 12))
+
+        picker.update_idletasks()
+        w, h = 700, min(400, 80 + len(commands) * 22)
+        x = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
+        picker.geometry(f"{w}x{h}+{x}+{y}")
+        picker.deiconify()
+
+    def _enable_custom_cli(self):
+        """使用者點了「自訂指令」，讓指令框變成可編輯"""
+        proj = self._get_project()
+        if not proj:
+            messagebox.showwarning("提示", "請先選擇專案")
+            return
+        folder = proj.get("folder", "")
+        code = proj.get("code_folder", "")
+        code_path = os.path.join(folder, code) if code else folder
+
+        self.cli_cmd_text.config(state=tk.NORMAL)
+        self.cli_cmd_text.delete("1.0", tk.END)
+        self.cli_cmd_text.insert("1.0", f"cd \"{code_path}\"\n")
+        self.status_var.set("自訂模式：請在指令框中輸入你要的 CLI 指令")
 
     def _update_round_display(self):
         proj = self._get_project()
