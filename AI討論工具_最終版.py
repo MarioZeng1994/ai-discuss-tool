@@ -15,6 +15,7 @@ import sys
 import json
 import re
 import subprocess
+import shutil
 from datetime import datetime
 
 IS_WIN = sys.platform == 'win32'
@@ -52,15 +53,49 @@ def resource_path(relative_path: str) -> str:
 
 
 def load_config():
-    if os.path.exists(CONFIG_FILE):
+    default_cfg = {"topics": {}, "last_topic": ""}
+    if not os.path.exists(CONFIG_FILE):
+        return default_cfg
+
+    try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"topics": {}, "last_topic": ""}
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            raise ValueError("Config root must be a JSON object.")
+        if "topics" not in cfg or not isinstance(cfg["topics"], dict):
+            cfg["topics"] = {}
+        if "last_topic" not in cfg or not isinstance(cfg["last_topic"], str):
+            cfg["last_topic"] = ""
+        return cfg
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError):
+        # 壞檔保留一份，避免資料完全消失。
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bad = os.path.join(DESKTOP, f"AI討論工具_config_corrupt_{ts}.bin")
+        try:
+            shutil.copy2(CONFIG_FILE, bad)
+        except OSError:
+            pass
+        try:
+            save_config(default_cfg)
+        except OSError:
+            pass
+        return default_cfg
 
 
 def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    temp_file = CONFIG_FILE + ".tmp"
+    try:
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, CONFIG_FILE)
+    finally:
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
 
 
 def scan_max_round(topic_folder):
