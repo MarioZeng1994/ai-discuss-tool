@@ -39,10 +39,14 @@ from ttkbootstrap.constants import *
 import ttkbootstrap as ttkb
 
 DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
+HOME_DIR = os.path.expanduser("~")
+APPDATA_ROOT = os.getenv("APPDATA") or os.path.join(HOME_DIR, "AppData", "Roaming")
+APP_SUPPORT_DIR = os.path.join(APPDATA_ROOT, "AIDiscussTool")
 APP_NAME = "AI 多窗口集中討論工具"
 CONFIG_NAME = "AI討論工具_config.json"
-CONFIG_FILE = os.path.join(DESKTOP, CONFIG_NAME)
-ERROR_LOG_FILE = os.path.join(DESKTOP, "AI討論工具_error.log")
+CONFIG_FILE = os.path.join(APP_SUPPORT_DIR, CONFIG_NAME)
+LEGACY_DESKTOP_CONFIG_FILE = os.path.join(DESKTOP, CONFIG_NAME)
+ERROR_LOG_FILE = os.path.join(APP_SUPPORT_DIR, "AI討論工具_error.log")
 TEXT_READ_ENCODINGS = ("utf-8", "utf-8-sig", "cp950", "cp936")
 INVALID_FS_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WINDOWS_RESERVED_NAMES = {
@@ -84,6 +88,7 @@ def _config_candidates():
     legacy_dir = os.path.join(DESKTOP, "AI討論工具")
     return _dedupe_paths([
         CONFIG_FILE,
+        LEGACY_DESKTOP_CONFIG_FILE,
         os.path.join(runtime_dir, CONFIG_NAME),
         os.path.join(legacy_dir, CONFIG_NAME),
     ])
@@ -95,7 +100,8 @@ def _is_primary_config(path):
 
 def _backup_corrupt_config(path):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bad = os.path.join(DESKTOP, f"AI討論工具_config_corrupt_{ts}.bin")
+    os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
+    bad = os.path.join(APP_SUPPORT_DIR, f"AI討論工具_config_corrupt_{ts}.bin")
     try:
         shutil.copy2(path, bad)
     except OSError:
@@ -143,6 +149,7 @@ def load_config():
 
 
 def save_config(cfg):
+    os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
     temp_file = CONFIG_FILE + ".tmp"
     try:
         with open(temp_file, "w", encoding="utf-8") as f:
@@ -160,6 +167,7 @@ def save_config(cfg):
 
 def _append_error_log(block):
     try:
+        os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
         with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(block.rstrip() + "\n")
             f.write("-" * 80 + "\n")
