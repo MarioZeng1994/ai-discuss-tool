@@ -14,8 +14,10 @@ import os
 import sys
 import json
 import re
+import hashlib
 import subprocess
 import shutil
+import traceback
 from datetime import datetime
 
 IS_WIN = sys.platform == 'win32'
@@ -37,7 +39,17 @@ from ttkbootstrap.constants import *
 import ttkbootstrap as ttkb
 
 DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
-CONFIG_FILE = os.path.join(DESKTOP, "AI討論工具_config.json")
+APP_NAME = "AI 多窗口集中討論工具"
+CONFIG_NAME = "AI討論工具_config.json"
+CONFIG_FILE = os.path.join(DESKTOP, CONFIG_NAME)
+ERROR_LOG_FILE = os.path.join(DESKTOP, "AI討論工具_error.log")
+TEXT_READ_ENCODINGS = ("utf-8", "utf-8-sig", "cp950", "cp936")
+INVALID_FS_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
 
 ICON_NAME_ICO = "玻璃球.ico"
 ICON_NAME_ICNS = "玻璃球.icns"
@@ -52,34 +64,82 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base, relative_path)
 
 
+def _dedupe_paths(paths):
+    unique = []
+    seen = set()
+    for path in paths:
+        norm = os.path.normcase(os.path.abspath(path))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        unique.append(path)
+    return unique
+
+
+def _config_candidates():
+    if getattr(sys, 'frozen', False):
+        runtime_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        runtime_dir = os.path.dirname(os.path.abspath(__file__))
+    legacy_dir = os.path.join(DESKTOP, "AI討論工具")
+    return _dedupe_paths([
+        CONFIG_FILE,
+        os.path.join(runtime_dir, CONFIG_NAME),
+        os.path.join(legacy_dir, CONFIG_NAME),
+    ])
+
+
+def _is_primary_config(path):
+    return os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(CONFIG_FILE))
+
+
+def _backup_corrupt_config(path):
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bad = os.path.join(DESKTOP, f"AI討論工具_config_corrupt_{ts}.bin")
+    try:
+        shutil.copy2(path, bad)
+    except OSError:
+        pass
+
+
+def _normalize_config(cfg):
+    if not isinstance(cfg, dict):
+        raise ValueError("Config root must be a JSON object.")
+    if "topics" not in cfg or not isinstance(cfg["topics"], dict):
+        cfg["topics"] = {}
+    if "last_topic" not in cfg or not isinstance(cfg["last_topic"], str):
+        cfg["last_topic"] = ""
+    return cfg
+
+
 def load_config():
     default_cfg = {"topics": {}, "last_topic": ""}
-    if not os.path.exists(CONFIG_FILE):
-        return default_cfg
+    saw_primary_error = False
 
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        if not isinstance(cfg, dict):
-            raise ValueError("Config root must be a JSON object.")
-        if "topics" not in cfg or not isinstance(cfg["topics"], dict):
-            cfg["topics"] = {}
-        if "last_topic" not in cfg or not isinstance(cfg["last_topic"], str):
-            cfg["last_topic"] = ""
-        return cfg
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError):
-        # 壞檔保留一份，避免資料完全消失。
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bad = os.path.join(DESKTOP, f"AI討論工具_config_corrupt_{ts}.bin")
+    for path in _config_candidates():
+        if not os.path.exists(path):
+            continue
         try:
-            shutil.copy2(CONFIG_FILE, bad)
-        except OSError:
-            pass
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = _normalize_config(json.load(f))
+            if not _is_primary_config(path):
+                try:
+                    save_config(cfg)
+                except OSError:
+                    pass
+            return cfg
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError):
+            _record_exception(f"讀取設定檔失敗：{path}")
+            if _is_primary_config(path):
+                saw_primary_error = True
+            _backup_corrupt_config(path)
+
+    if saw_primary_error:
         try:
             save_config(default_cfg)
         except OSError:
             pass
-        return default_cfg
+    return default_cfg
 
 
 def save_config(cfg):
@@ -98,11 +158,114 @@ def save_config(cfg):
                 pass
 
 
+def _append_error_log(block):
+    try:
+        with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(block.rstrip() + "\n")
+            f.write("-" * 80 + "\n")
+    except OSError:
+        pass
+
+
+def _record_exception(context, exc_info=None, extra=None):
+    if exc_info is None:
+        exc_info = sys.exc_info()
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [f"[{stamp}] {context}"]
+    if extra:
+        lines.append(str(extra))
+    if exc_info and exc_info[0] is not None:
+        lines.extend("".join(traceback.format_exception(*exc_info)).rstrip().splitlines())
+    _append_error_log("\n".join(lines))
+
+
+def _safe_fs_component(name, fallback="未命名", limit=80):
+    raw = (name or "").strip()
+    sanitized = INVALID_FS_CHARS_RE.sub("_", raw)
+    sanitized = re.sub(r"\s+", " ", sanitized).rstrip(" .")
+    if not sanitized:
+        sanitized = fallback
+
+    trimmed = sanitized[:limit].rstrip(" .") or fallback
+    if trimmed.upper() in WINDOWS_RESERVED_NAMES:
+        trimmed += "_"
+
+    changed = (trimmed != raw) or (sanitized != raw)
+    if changed and raw:
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+        base = trimmed[:max(8, limit - 9)].rstrip(" .") or fallback
+        trimmed = f"{base}_{digest}"
+    return trimmed
+
+
+def _topic_folder_name(topic_name):
+    return _safe_fs_component(topic_name, fallback="未命名主題")
+
+
+def _ai_reply_filename(ai_name):
+    return f"{_safe_fs_component(ai_name, fallback='AI')}_回覆.txt"
+
+
+def _ai_reply_path_candidates(folder, ai_name):
+    return _dedupe_paths([
+        os.path.join(folder, f"{ai_name}_回覆.txt"),
+        os.path.join(folder, _ai_reply_filename(ai_name)),
+    ])
+
+
+def _read_text_file(path, default=""):
+    if not os.path.exists(path):
+        return default
+
+    for encoding in TEXT_READ_ENCODINGS:
+        try:
+            with open(path, "r", encoding=encoding) as f:
+                return f.read()
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            _record_exception(f"讀取檔案失敗：{path}")
+            return default
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        _record_exception(f"讀取檔案失敗：{path}")
+        return default
+
+
+def _write_text_file(path, text):
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    temp_file = path + ".tmp"
+    try:
+        with open(temp_file, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, path)
+    finally:
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
+
+
 def scan_max_round(topic_folder):
     if not os.path.isdir(topic_folder):
         return 0
     mx = 0
-    for name in os.listdir(topic_folder):
+    try:
+        names = os.listdir(topic_folder)
+    except OSError:
+        _record_exception(f"掃描輪次資料夾失敗：{topic_folder}")
+        return 0
+
+    for name in names:
         m = re.match(r"^第(\d+)輪$", name)
         if m and os.path.isdir(os.path.join(topic_folder, name)):
             mx = max(mx, int(m.group(1)))
@@ -116,13 +279,11 @@ def read_round_files(topic_folder, round_num, ai_list):
     responses = {}
     q_path = os.path.join(folder, "提問.txt")
     if os.path.exists(q_path):
-        with open(q_path, "r", encoding="utf-8") as f:
-            question = f.read()
+        question = _read_text_file(q_path, default="")
     for ai in ai_list:
-        ai_file = os.path.join(folder, f"{ai['name']}_回覆.txt")
-        if os.path.exists(ai_file):
-            with open(ai_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+        ai_file = next((path for path in _ai_reply_path_candidates(folder, ai["name"]) if os.path.exists(path)), "")
+        if ai_file:
+            lines = _read_text_file(ai_file, default="").splitlines(True)
             content_lines = []
             past_header = False
             for line in lines:
@@ -149,6 +310,9 @@ class App:
         self.root.geometry("780x820")
         self.root.minsize(600, 450)
         self.colors = self.style.colors
+        self._closing = False
+        self._runtime_error_open = False
+        self._install_exception_handlers()
         self._set_dark_titlebar(saved_theme)
         self._setup_icon()
 
@@ -172,7 +336,7 @@ class App:
             prefs["no_full_record"] = False
             prefs["only_full_record"] = False
             self.cfg["prefs"] = prefs
-            save_config(self.cfg)
+            self._persist_config(silent=True)
         self._focused_text = None
 
         current_theme = self.cfg.get("theme", "cosmo")
@@ -194,6 +358,129 @@ class App:
         self._bind_keyboard_shortcuts()
         self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
+    def _install_exception_handlers(self):
+        self.root.report_callback_exception = self._report_callback_exception
+        self._previous_excepthook = sys.excepthook
+        sys.excepthook = self._handle_uncaught_exception
+
+    def _report_callback_exception(self, exc, val, tb):
+        self._handle_runtime_exception("Tkinter callback 發生未處理錯誤", (exc, val, tb))
+
+    def _handle_uncaught_exception(self, exc, val, tb):
+        self._handle_runtime_exception("程式發生未處理錯誤", (exc, val, tb), parent=None)
+
+    def _handle_runtime_exception(self, context, exc_info=None, parent="root"):
+        _record_exception(context, exc_info=exc_info)
+        if self._runtime_error_open:
+            return
+
+        if parent == "root":
+            parent_widget = self.root if self._widget_alive(self.root) and not self._closing else None
+        else:
+            parent_widget = parent
+
+        summary = context
+        if exc_info and len(exc_info) >= 2 and exc_info[1] is not None:
+            summary = str(exc_info[1]) or context
+
+        self._runtime_error_open = True
+        try:
+            messagebox.showerror(
+                "程式錯誤",
+                f"{summary}\n\n詳細錯誤已寫入：\n{ERROR_LOG_FILE}",
+                parent=parent_widget
+            )
+        except Exception:
+            pass
+        finally:
+            self._runtime_error_open = False
+
+    @staticmethod
+    def _widget_alive(widget):
+        if widget is None:
+            return False
+        try:
+            return bool(int(widget.winfo_exists()))
+        except Exception:
+            return False
+
+    def _safe_destroy(self, widget):
+        if not self._widget_alive(widget):
+            return
+        try:
+            widget.destroy()
+        except Exception:
+            _record_exception("關閉視窗失敗")
+
+    def _safe_after(self, widget, delay_ms, callback, context):
+        if not self._widget_alive(widget):
+            return None
+
+        def _runner():
+            if self._closing or not self._widget_alive(widget):
+                return
+            try:
+                callback()
+            except Exception:
+                self._handle_runtime_exception(context, sys.exc_info())
+
+        try:
+            return widget.after(delay_ms, _runner)
+        except Exception:
+            self._handle_runtime_exception(f"排程失敗：{context}", sys.exc_info())
+            return None
+
+    def _safe_after_idle(self, widget, callback, context):
+        if not self._widget_alive(widget):
+            return None
+
+        def _runner():
+            if self._closing or not self._widget_alive(widget):
+                return
+            try:
+                callback()
+            except Exception:
+                self._handle_runtime_exception(context, sys.exc_info())
+
+        try:
+            return widget.after_idle(_runner)
+        except Exception:
+            self._handle_runtime_exception(f"排程失敗：{context}", sys.exc_info())
+            return None
+
+    def _persist_config(self, silent=False, parent=None):
+        try:
+            save_config(self.cfg)
+            return True
+        except Exception:
+            _record_exception("儲存設定檔失敗")
+            if not silent:
+                self._handle_runtime_exception(
+                    "無法寫入設定檔",
+                    sys.exc_info(),
+                    parent=parent if parent is not None else "root"
+                )
+            return False
+
+    def _ensure_dir(self, path, context):
+        try:
+            os.makedirs(path, exist_ok=True)
+            return True
+        except Exception:
+            self._handle_runtime_exception(f"{context}：{path}", sys.exc_info())
+            return False
+
+    def _write_text_safely(self, path, text, context):
+        try:
+            _write_text_file(path, text)
+            return True
+        except Exception:
+            self._handle_runtime_exception(f"{context}：{path}", sys.exc_info())
+            return False
+
+    def _reply_file_path(self, folder, ai_name):
+        return os.path.join(folder, _ai_reply_filename(ai_name))
+
     def _bind_keyboard_shortcuts(self):
         """鍵盤快捷鍵（參考 report_tool 模式）"""
         def _on_ctrl_enter(e):
@@ -206,7 +493,8 @@ class App:
 
         def _on_escape(e):
             self._focused_text = None
-            self.root.focus_set()
+            if self._widget_alive(self.root):
+                self.root.focus_set()
 
         self.root.bind('<Control-Return>', _on_ctrl_enter)
         self.root.bind('<Control-n>', _on_ctrl_n)
@@ -421,7 +709,10 @@ class App:
         ttkb.Label(row_switch, text="切換主題：").pack(side="left")
         self.combo_topic = ttkb.Combobox(row_switch, width=45, state="readonly")
         self.combo_topic.pack(side="left", padx=6)
-        self.combo_topic.bind("<<ComboboxSelected>>", lambda e: self.root.after_idle(self._on_topic_selected))
+        self.combo_topic.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._safe_after_idle(self.root, self._on_topic_selected, "切換主題")
+        )
 
         self.lbl_topic_status = ttkb.Label(row_switch, text="", bootstyle="success")
         self.lbl_topic_status.pack(side="left", padx=5)
@@ -520,8 +811,9 @@ class App:
 
         # 關閉
         def _close_settings():
-            self._save_prefs()
-            dlg.destroy()
+            if not self._save_prefs():
+                return
+            self._safe_destroy(dlg)
         btn_close = ttkb.Button(dlg, text="關閉", command=_close_settings,
                                  bootstyle="secondary")
         btn_close.pack(pady=12)
@@ -545,7 +837,8 @@ class App:
             messagebox.showerror("主題切換失敗", f"無法切換主題：\n{e}")
             return
         self.cfg["theme"] = theme
-        save_config(self.cfg)
+        if not self._persist_config():
+            return
         messagebox.showinfo("主題已切換", f"已切換為「{display}」。")
 
     def _save_templates(self):
@@ -563,7 +856,7 @@ class App:
             "use_opening": self._use_opening.get(),
             "use_closing": self._use_closing.get(),
         }
-        save_config(self.cfg)
+        return self._persist_config()
 
     def _save_prefs(self):
         self.cfg["prefs"] = {
@@ -572,7 +865,7 @@ class App:
             "no_full_record": self._no_full_record.get(),
             "only_full_record": self._only_full_record.get(),
         }
-        save_config(self.cfg)
+        return self._persist_config()
 
     def _resolve_placeholders(self, text):
         """將模板佔位符替換為實際路徑（加「」框）"""
@@ -610,8 +903,9 @@ class App:
 
         # 先 pack 底部按鈕，保證永遠可見
         def _on_close():
-            self._save_templates()
-            dlg.destroy()
+            if not self._save_templates():
+                return
+            self._safe_destroy(dlg)
             # 重新載入當前輪次 UI，保留未儲存草稿，讓罐頭按鈕即時更新
             self._refresh_current_round_preserve_draft()
         btn_frame = ttkb.Frame(dlg)
@@ -812,7 +1106,7 @@ class App:
                 return
             item["name"] = ent_name.get().strip() or orig_name
             item["text"] = text
-            dlg.destroy()
+            self._safe_destroy(dlg)
             refresh_cb()
 
         def _cancel():
@@ -821,7 +1115,7 @@ class App:
             else:
                 item["name"] = orig_name
                 item["text"] = orig_text
-            dlg.destroy()
+            self._safe_destroy(dlg)
             refresh_cb()
 
         dlg.protocol("WM_DELETE_WINDOW", _cancel)
@@ -835,27 +1129,25 @@ class App:
 
         self._center_dialog(dlg, 520, 420)
 
-    @staticmethod
-    def _set_dark_titlebar(theme_name):
+    def _set_dark_titlebar(self, theme_name):
         if not IS_WIN:
             return
         dark_themes = {"darkly", "cyborg", "solar", "superhero", "vapor"}
         try:
             import ctypes
-            # 需要在 root.update() 之後才能拿到 hwnd，延遲處理
+
             def _apply():
                 try:
-                    root = tk._default_root
-                    if root is None:
+                    if not self._widget_alive(self.root):
                         return
-                    root.update_idletasks()
-                    hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+                    self.root.update_idletasks()
+                    hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
                     value = ctypes.c_int(1 if theme_name in dark_themes else 0)
                     ctypes.windll.dwmapi.DwmSetWindowAttribute(
                         hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
                 except Exception:
                     pass
-            tk._default_root.after(100, _apply)
+            self._safe_after(self.root, 100, _apply, "套用標題列主題")
         except Exception:
             pass
 
@@ -933,7 +1225,7 @@ class App:
         def _on_paste(event):
             if self._auto_unfocus_on_paste.get() and not getattr(txt_widget, '_paste_done', False):
                 txt_widget._paste_done = True
-                self.root.after(50, lambda: self.root.focus_set())
+                self._safe_after(self.root, 50, self.root.focus_set, "貼上後移除焦點")
 
         txt_widget.bind('<FocusIn>', _on_focus_in, add='+')
         txt_widget.bind('<FocusOut>', _on_focus_out, add='+')
@@ -954,7 +1246,7 @@ class App:
         folder = topic_info.get("folder", "") if isinstance(topic_info, dict) else ""
         folder = self._normalize_path(folder)
         if not folder:
-            folder = os.path.join(DESKTOP, topic_name)
+            folder = os.path.join(DESKTOP, _topic_folder_name(topic_name))
         return folder
 
     def _refresh_topic_combo(self):
@@ -996,7 +1288,8 @@ class App:
         info["folder"] = folder
         topics_cfg[t] = info
         self.cfg["last_topic"] = t
-        save_config(self.cfg)
+        if not self._persist_config():
+            return
 
         self.topic_var.set(t)
         self.topic_folder = folder
@@ -1027,7 +1320,7 @@ class App:
             messagebox.showerror("錯誤", f"無法建立主題根目錄：\n{root}\n\n{e}")
             return
 
-        folder = os.path.join(root, t)
+        folder = os.path.join(root, _topic_folder_name(t))
         if os.path.exists(folder) and not os.path.isdir(folder):
             messagebox.showerror("錯誤", f"建立失敗：目標不是資料夾\n{folder}")
             return
@@ -1067,6 +1360,9 @@ class App:
         if not name:
             messagebox.showwarning("提示", "請輸入 AI 名稱")
             return
+        if any((ai.get("name", "").strip().casefold() == name.casefold()) for ai in self.ai_list):
+            messagebox.showwarning("提示", f"AI 名稱「{name}」已存在，請使用不同名稱。")
+            return
         self.ai_list.append({"name": name, "path": path})
         self.ent_ai_name.delete(0, tk.END)
         self.ent_ai_path.delete(0, tk.END)
@@ -1104,19 +1400,24 @@ class App:
         if self.topic_folder:
             info["folder"] = self.topic_folder
         topics_cfg[t] = info
-        save_config(self.cfg)
+        if not self._persist_config():
+            return
         if self.topic_folder:
-            os.makedirs(self.topic_folder, exist_ok=True)
+            if not self._ensure_dir(self.topic_folder, "建立主題資料夾失敗"):
+                return
             info_path = os.path.join(self.topic_folder, "AI成員資料.txt")
-            with open(info_path, "w", encoding="utf-8") as f:
-                f.write(f"主題：{t}\n")
-                f.write(f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write("=" * 50 + "\n\n")
-                for ai in self.ai_list:
-                    f.write(f"AI 名稱：{ai['name']}\n")
-                    if ai.get('path'):
-                        f.write(f"工作資料夾：{ai['path']}\n")
-                    f.write("-" * 30 + "\n")
+            info_lines = [
+                f"主題：{t}",
+                f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                "=" * 50,
+                "",
+            ]
+            for ai in self.ai_list:
+                info_lines.append(f"AI 名稱：{ai['name']}")
+                if ai.get('path'):
+                    info_lines.append(f"工作資料夾：{ai['path']}")
+                info_lines.append("-" * 30)
+            self._write_text_safely(info_path, "\n".join(info_lines), "寫入 AI 成員資料失敗")
 
     # ═══════════════════════════════════════════════════════
     #  輪次導航
@@ -1145,7 +1446,8 @@ class App:
             return
         self.max_round = scan_max_round(self.topic_folder)
         new_n = self.max_round + 1
-        os.makedirs(os.path.join(self.topic_folder, f"第{new_n}輪"), exist_ok=True)
+        if not self._ensure_dir(os.path.join(self.topic_folder, f"第{new_n}輪"), "建立新輪次資料夾失敗"):
+            return
         self._goto_round(new_n)
         # 自動收合設定
         if self._settings_visible:
@@ -1154,14 +1456,17 @@ class App:
     def _goto_round(self, n):
         if not self.topic_folder or not self.ai_list:
             return
-        self.viewing_round = n
-        rn = f"第{n}輪"
-        saved_q, saved_r = read_round_files(self.topic_folder, n, self.ai_list)
-        has_saved = bool(saved_q) or bool(saved_r)
-        self._build_round_ui(n, saved_q, saved_r, has_saved)
-        self.lbl_round.config(text=f"══ {rn} ══", fg="#ffffff")
-        self.btn_submit.config(state="normal")
-        self._update_nav()
+        try:
+            self.viewing_round = n
+            rn = f"第{n}輪"
+            saved_q, saved_r = read_round_files(self.topic_folder, n, self.ai_list)
+            has_saved = bool(saved_q) or bool(saved_r)
+            self._build_round_ui(n, saved_q, saved_r, has_saved)
+            self.lbl_round.config(text=f"══ {rn} ══", fg="#ffffff")
+            self.btn_submit.config(state="normal")
+            self._update_nav()
+        except Exception:
+            self._handle_runtime_exception(f"載入第{n}輪失敗", sys.exc_info())
 
     def _clear_discuss(self):
         for w in self.frm_discuss.winfo_children():
@@ -1286,7 +1591,10 @@ class App:
                     self._auto_advance.set(old_auto_advance)
                 if self._has_unsaved_text_changes():
                     return
-        self.root.destroy()
+        self._closing = True
+        if getattr(self, "_previous_excepthook", None):
+            sys.excepthook = self._previous_excepthook
+        self._safe_destroy(self.root)
 
     # ═══════════════════════════════════════════════════════
     #  討論 UI
@@ -1471,7 +1779,7 @@ class App:
                 refresh_state["pending"] = False
                 _relayout()
 
-            flow.after_idle(_run)
+            self._safe_after_idle(flow, _run, "重新排版按鈕列")
 
         flow.bind("<Configure>", _schedule)
         _relayout(force=True)
@@ -1517,10 +1825,11 @@ class App:
 
         def _save_and_close():
             new_content = big_txt.get("1.0", tk.END).rstrip("\n")
-            txt_widget.delete("1.0", tk.END)
-            if new_content:
-                txt_widget.insert("1.0", new_content)
-            dlg.destroy()
+            if self._widget_alive(txt_widget):
+                txt_widget.delete("1.0", tk.END)
+                if new_content:
+                    txt_widget.insert("1.0", new_content)
+            self._safe_destroy(dlg)
 
         dlg.protocol("WM_DELETE_WINDOW", _save_and_close)
         dlg.bind('<Escape>', lambda e: _save_and_close())
@@ -1542,7 +1851,8 @@ class App:
         question = self.txt_question.get("1.0", tk.END).strip()
         rn = f"第{self.viewing_round}輪"
         round_folder = os.path.join(self.topic_folder, rn)
-        os.makedirs(round_folder, exist_ok=True)
+        if not self._ensure_dir(round_folder, "建立輪次資料夾失敗"):
+            return
 
         lines = [
             f"主題：{self.topic_var.get().strip()}",
@@ -1567,22 +1877,39 @@ class App:
             write_split = True
 
         if write_full:
-            with open(os.path.join(round_folder, f"{rn}_完整紀錄.txt"), "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
+            if not self._write_text_safely(
+                os.path.join(round_folder, f"{rn}_完整紀錄.txt"),
+                "\n".join(lines),
+                "寫入完整紀錄失敗"
+            ):
+                return
 
         if write_split:
             for aw in self.ai_text_widgets:
                 resp = aw["widget"].get("1.0", tk.END).strip()
-                with open(os.path.join(round_folder, f"{aw['name']}_回覆.txt"), "w", encoding="utf-8") as f:
-                    f.write(f"AI 名稱：{aw['name']}\n")
-                    if aw.get("path"):
-                        f.write(f"專案路徑：{aw['path']}\n")
-                    f.write(f"輪次：{rn}\n")
-                    f.write("-" * 40 + "\n")
-                    f.write(resp if resp else "（未填寫）")
+                reply_lines = [
+                    f"AI 名稱：{aw['name']}",
+                ]
+                if aw.get("path"):
+                    reply_lines.append(f"專案路徑：{aw['path']}")
+                reply_lines.extend([
+                    f"輪次：{rn}",
+                    "-" * 40,
+                    resp if resp else "（未填寫）",
+                ])
+                if not self._write_text_safely(
+                    self._reply_file_path(round_folder, aw["name"]),
+                    "\n".join(reply_lines),
+                    "寫入 AI 回覆檔失敗"
+                ):
+                    return
 
-            with open(os.path.join(round_folder, "提問.txt"), "w", encoding="utf-8") as f:
-                f.write(question)
+            if not self._write_text_safely(
+                os.path.join(round_folder, "提問.txt"),
+                question,
+                "寫入提問檔失敗"
+            ):
+                return
 
         self._sync_saved_snapshot_from_widgets()
         self._rebuild_accumulated()
@@ -1597,7 +1924,7 @@ class App:
 
     def _rebuild_accumulated(self):
         if not self.topic_folder:
-            return
+            return False
         mx = scan_max_round(self.topic_folder)
         all_lines = [
             f"主題：{self.topic_var.get().strip()}  —  全部討論累積紀錄",
@@ -1609,33 +1936,66 @@ class App:
             rn = f"第{i}輪"
             rp = os.path.join(self.topic_folder, rn, f"{rn}_完整紀錄.txt")
             if os.path.exists(rp):
-                with open(rp, "r", encoding="utf-8") as f:
-                    all_lines.append(f.read())
-                all_lines.append("\n")
-        with open(os.path.join(self.topic_folder, "全部討論紀錄（累積）.txt"), "w", encoding="utf-8") as f:
-            f.write("\n".join(all_lines))
+                content = _read_text_file(rp, default="").rstrip()
+                if content:
+                    all_lines.append(content)
+                    all_lines.append("")
+                    continue
+
+            question, replies = read_round_files(self.topic_folder, i, self.ai_list)
+            if not question and not replies:
+                continue
+
+            fallback_lines = [
+                f"主題：{self.topic_var.get().strip()}",
+                f"輪次：{rn}",
+                "=" * 60,
+                "",
+                "【本輪提問】",
+                question,
+                "",
+                "=" * 60,
+            ]
+            for ai in self.ai_list:
+                reply = replies.get(ai["name"], "")
+                fallback_lines += ["", f"【{ai['name']}】的回覆"]
+                if ai.get("path"):
+                    fallback_lines.append(f"專案路徑：{ai['path']}")
+                fallback_lines += ["-" * 40, reply if reply else "（未填寫）", "", "=" * 60]
+            all_lines.append("\n".join(fallback_lines).rstrip())
+            all_lines.append("")
+        return self._write_text_safely(
+            os.path.join(self.topic_folder, "全部討論紀錄（累積）.txt"),
+            "\n".join(all_lines),
+            "更新累積紀錄失敗"
+        )
 
     # ═══════════════════════════════════════════════════════
     #  工具
     # ═══════════════════════════════════════════════════════
-    @staticmethod
-    def _open_path(path):
+    def _open_path(self, path):
         """跨平台開啟檔案或資料夾"""
-        if IS_WIN:
-            os.startfile(path)
-        elif IS_MAC:
-            subprocess.Popen(['open', path])
-        else:
-            subprocess.Popen(['xdg-open', path])
+        try:
+            if IS_WIN:
+                os.startfile(path)
+            elif IS_MAC:
+                subprocess.Popen(['open', path])
+            else:
+                subprocess.Popen(['xdg-open', path])
+        except Exception:
+            self._handle_runtime_exception(f"開啟路徑失敗：{path}", sys.exc_info())
 
     def _center_dialog(self, dlg, w, h):
         """將彈窗置中於主視窗（需先 withdraw，最後 deiconify）"""
+        if not self._widget_alive(dlg) or not self._widget_alive(self.root):
+            return
         dlg.update_idletasks()
         rx = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
         ry = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 2
         dlg.geometry(f"{w}x{h}+{max(rx,0)}+{max(ry,0)}")
         dlg.update_idletasks()
-        dlg.deiconify()
+        if self._widget_alive(dlg):
+            dlg.deiconify()
 
     def _open_folder(self):
         if self.topic_folder and os.path.isdir(self.topic_folder):
