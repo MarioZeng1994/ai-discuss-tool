@@ -1095,7 +1095,7 @@ class App:
                             command=lambda idx=ci: txt.insert(tk.INSERT, self._canned[idx]["text"])
                             ).pack(side="left", padx=2)
 
-        txt = scrolledtext.ScrolledText(dlg, height=8, font=("Microsoft JhengHei", 10), wrap="word")
+        txt = scrolledtext.ScrolledText(dlg, height=8, font=("Microsoft JhengHei", 10), wrap="char")
         txt.pack(fill="both", expand=True, padx=8, pady=(2, 4))
         txt.insert("1.0", item.get("text", ""))
 
@@ -1669,7 +1669,7 @@ class App:
             self._create_wrapping_buttons(frm_q, "罐頭：", can_btns, pady=(0, 4))
 
         self.txt_question= scrolledtext.ScrolledText(frm_q, height=7,
-                                                       font=("Microsoft JhengHei", 10), wrap="word")
+                                                       font=("Microsoft JhengHei", 10), wrap="char")
         self.txt_question.pack(fill="x")
         self._bind_text_focus(self.txt_question)
         self._place_expand_btn(frm_q, self.txt_question, "本輪提問")
@@ -1701,7 +1701,7 @@ class App:
             frm_ai.pack(fill="x", padx=8, pady=3)
 
             txt = scrolledtext.ScrolledText(frm_ai, height=4,
-                                             font=("Microsoft JhengHei", 10), wrap="word")
+                                             font=("Microsoft JhengHei", 10), wrap="char")
             txt.pack(fill="x")
             self._bind_text_focus(txt)
             self._place_expand_btn(frm_ai, txt, ai['name'])
@@ -1812,7 +1812,7 @@ class App:
         big_txt = scrolledtext.ScrolledText(
             dlg,
             font=("Microsoft JhengHei", 11),
-            wrap="word",
+            wrap="char",
             bg=input_bg,
             fg=input_fg,
             insertbackground=input_fg
