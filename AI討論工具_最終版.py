@@ -361,6 +361,8 @@ class App:
         self._saved_snapshot_round = 0
         self._saved_snapshot_question = ""
         self._saved_snapshot_replies = {}
+        self._current_round_has_saved_content = False
+        self._round_status_refresh_pending = False
         self._build_ui()
         self._load_last_session()
         self._bind_keyboard_shortcuts()
@@ -1235,9 +1237,15 @@ class App:
                 txt_widget._paste_done = True
                 self._safe_after(self.root, 50, self.root.focus_set, "貼上後移除焦點")
 
+        def _on_modified(event):
+            if txt_widget.edit_modified():
+                txt_widget.edit_modified(False)
+                self._schedule_round_status_refresh()
+
         txt_widget.bind('<FocusIn>', _on_focus_in, add='+')
         txt_widget.bind('<FocusOut>', _on_focus_out, add='+')
         txt_widget.bind('<<Paste>>', _on_paste, add='+')
+        txt_widget.bind('<<Modified>>', _on_modified, add='+')
 
     # ═══════════════════════════════════════════════════════
     #  主題
@@ -1437,6 +1445,32 @@ class App:
         if hasattr(self, "btn_next"):
             self.btn_next.config(state="normal" if self.viewing_round < self.max_round else "disabled")
 
+    def _refresh_round_status_label(self):
+        if self.viewing_round <= 0 or not hasattr(self, "lbl_round"):
+            return
+
+        rn = f"第{self.viewing_round}輪"
+        if self._has_unsaved_text_changes():
+            self.lbl_round.config(text=f"✏️ {rn}（未儲存變更）", fg="#F39C12")
+        elif self._current_round_has_saved_content:
+            self.lbl_round.config(text=f"📖 {rn}（已儲存 ✔）", fg="#1565C0")
+        else:
+            self.lbl_round.config(text=f"══ {rn} ══", fg="#ffffff")
+
+    def _schedule_round_status_refresh(self):
+        if self._round_status_refresh_pending or not self._widget_alive(self.root):
+            return
+
+        self._round_status_refresh_pending = True
+
+        def _run():
+            self._round_status_refresh_pending = False
+            self._refresh_round_status_label()
+
+        token = self._safe_after_idle(self.root, _run, "更新輪次儲存狀態")
+        if token is None:
+            self._round_status_refresh_pending = False
+
     def _prev_round(self):
         if self.viewing_round > 1:
             self._goto_round(self.viewing_round - 1)
@@ -1469,8 +1503,9 @@ class App:
             rn = f"第{n}輪"
             saved_q, saved_r = read_round_files(self.topic_folder, n, self.ai_list)
             has_saved = bool(saved_q) or bool(saved_r)
+            self._current_round_has_saved_content = has_saved
             self._build_round_ui(n, saved_q, saved_r, has_saved)
-            self.lbl_round.config(text=f"══ {rn} ══", fg="#ffffff")
+            self._refresh_round_status_label()
             self.btn_submit.config(state="normal")
             self._update_nav()
         except Exception:
@@ -1483,6 +1518,7 @@ class App:
         self._saved_snapshot_round = 0
         self._saved_snapshot_question = ""
         self._saved_snapshot_replies = {}
+        self._current_round_has_saved_content = False
 
     def _normalize_text(self, text):
         return (text or "").strip()
@@ -1542,6 +1578,7 @@ class App:
                 self._focused_text = None
         else:
             self._focused_text = None
+        self._schedule_round_status_refresh()
 
     def _refresh_current_round_preserve_draft(self):
         if self.viewing_round <= 0 or not self.topic_folder or not self.ai_list:
@@ -1921,7 +1958,8 @@ class App:
 
         self._sync_saved_snapshot_from_widgets()
         self._rebuild_accumulated()
-        self.lbl_round.config(text=f"📖 {rn}（已儲存 ✔）")
+        self._current_round_has_saved_content = True
+        self._refresh_round_status_label()
         self._update_nav()
         if show_done_message:
             messagebox.showinfo("完成", f"{rn} 已儲存至：\n{round_folder}")
